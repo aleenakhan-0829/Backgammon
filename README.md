@@ -144,8 +144,6 @@ scp -r out/ ubuntu@<EC2-IP>:~/backgammon/
 Run server:
 java -cp out server.BackgammonServer
 
-Tip: Use nohup or screen so server keeps running after logout.
-
 Clients connect using EC2 public IP
  **Game Features**
 Standard Backgammon rules
@@ -165,7 +163,6 @@ git add .
 git commit -m "Initial project version"
 git push -u origin main
 
-Tip: Commit often to show development progress.
 
  **Submission File Name**
 aleena_khan_2521051704_networklab_2026_project.zip
