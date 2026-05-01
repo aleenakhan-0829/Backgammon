@@ -4,54 +4,63 @@
 
 package com.mycompany.backgammongame;
 
+import com.yourpackage.backgammon.clienthandler.ClientHandler;
+import java.net.ServerSocket;
 import java.net.Socket;
+import java.io.IOException;
 
 /**
  *
  * @author Aleena's PC
  */
 public class BackgammonGame {
+
     // Port the server listens on
-    private static final int PORT = 5555;
+    private static final int SERVER_PORT = 10534;
+
+    // Networking
+    private ServerSocket gameserverSocket;
 
     // Two client handlers (one per player)
-    private ClientHandler player1;
-    private ClientHandler player2;
+    private ClientHandler playerA;
+    private ClientHandler playerB;
 
-    // Shared game state (single instance, both handlers reference it)
-    private GameState gameState;
+    // Shared game state
+    private GameState boardState;
 
     // Lock object for synchronisation
-    private final Object lock = new Object();
+    private final Object gamelock = new Object();
+
+    // Game flow counters
+    private int playersready = 0;
+    private int playagaincount = 0;
 
     public static void main(String[] args) {
         System.out.println("=== Backgammon Server Starting ===");
-        new BackgammonServer().start();
+        new BackgammonGame().start();
     }
 
     public void start() {
         try {
-            System.out.println("Server listening on port " + PORT);
+            gameserverSocket = new ServerSocket(SERVER_PORT);
+            System.out.println("Server listening on port " + SERVER_PORT);
 
-            // Keep accepting new game sessions indefinitely
             while (true) {
                 System.out.println("\nWaiting for Player 1...");
-                Socket s1 = serverSocket.accept();
+                Socket s1 = gameserverSocket.accept();
                 System.out.println("Player 1 connected: " + s1.getInetAddress());
 
                 System.out.println("Waiting for Player 2...");
-                Socket s2 = serverSocket.accept();
+                Socket s2 = gameserverSocket.accept();
                 System.out.println("Player 2 connected: " + s2.getInetAddress());
 
-                // Fresh game state for each session
-                gameState = new GameState();
+                boardState = new GameState();
 
-                player1 = new ClientHandler(s1, 1, this);
-                player2 = new ClientHandler(s2, 2, this);
+                playerA = new ClientHandler(s1, 1, this);
+                playerB = new ClientHandler(s2, 2, this);
 
-                // Start both handler threads
-                new Thread(player1).start();
-                new Thread(player2).start();
+                new Thread(playerA).start();
+                new Thread(playerB).start();
 
                 System.out.println("Game session started!");
             }
@@ -61,17 +70,15 @@ public class BackgammonGame {
         }
     }
 
-    /**
-     * Called by a ClientHandler when it receives a message.
-     * Routes the message to the correct destination.
-     */
     public void handleMessage(int fromPlayer, String message) {
-        synchronized (lock) {
+        if (message == null) return;
+
+        synchronized (gamelock) {
             System.out.println("[P" + fromPlayer + "] -> " + message);
 
             String[] parts = message.split(":", 2);
             String command = parts[0];
-            String data = parts.length > 1 ? parts[1] : "";
+            String data = (parts.length > 1) ? parts[1] : "";
 
             switch (command) {
                 case "READY":
@@ -98,50 +105,43 @@ public class BackgammonGame {
         }
     }
 
-    // ---------------------------------------------------------------
-    // Game-flow handlers
-    // ---------------------------------------------------------------
-
-    private int readyCount = 0;
-    private int replayCount = 0;
-
-    /** Both players must send READY before the game begins. */
     private void handleReady(int player) {
-        readyCount++;
-        if (readyCount == 2) {
-            readyCount = 0;
-            gameState.reset();
-            broadcast("START:" + gameState.serialize());
-            sendToPlayer(gameState.getCurrentPlayer(), "YOUR_TURN:roll");
-            sendToOpponent(gameState.getCurrentPlayer(), "WAIT:opponent_rolling");
+        playersready++;
+
+        if (playersready == 2) {
+            playersready = 0;
+            boardState.reset();
+
+            broadcast("START:" + boardState.serialize());
+
+            sendToPlayer(boardState.getCurrentPlayer(), "YOUR_TURN:roll");
+            sendToOpponent(boardState.getCurrentPlayer(), "WAIT:opponent_rolling");
         }
     }
 
-    /** Player requests a dice roll. */
     private void handleRoll(int player) {
-        if (player != gameState.getCurrentPlayer()) {
+        if (player != boardState.getCurrentPlayer()) {
             sendToPlayer(player, "ERROR:not_your_turn");
             return;
         }
-        int[] dice = gameState.rollDice();
+
+        int[] dice = boardState.rollDice();
         broadcast("DICE:" + dice[0] + "," + dice[1]);
 
-        // Check if the current player has any valid moves
-        if (gameState.hasValidMoves()) {
+        if (boardState.hasValidMoves()) {
             sendToPlayer(player, "YOUR_TURN:move");
             sendToOpponent(player, "WAIT:opponent_moving");
         } else {
-            // No valid moves – skip turn
             broadcast("INFO:No valid moves for Player " + player + ". Skipping turn.");
-            gameState.nextTurn();
-            sendToPlayer(gameState.getCurrentPlayer(), "YOUR_TURN:roll");
-            sendToOpponent(gameState.getCurrentPlayer(), "WAIT:opponent_rolling");
+
+            boardState.nextTurn();
+            sendToPlayer(boardState.getCurrentPlayer(), "YOUR_TURN:roll");
+            sendToOpponent(boardState.getCurrentPlayer(), "WAIT:opponent_rolling");
         }
     }
 
-    /** Player sends a move: "from,to" */
     private void handleMove(int player, String data) {
-        if (player != gameState.getCurrentPlayer()) {
+        if (player != boardState.getCurrentPlayer()) {
             sendToPlayer(player, "ERROR:not_your_turn");
             return;
         }
@@ -152,31 +152,36 @@ public class BackgammonGame {
             return;
         }
 
-        int from = Integer.parseInt(coords[0]);
-        int to   = Integer.parseInt(coords[1]);
+        int from, to;
+        try {
+            from = Integer.parseInt(coords[0]);
+            to = Integer.parseInt(coords[1]);
+        } catch (NumberFormatException e) {
+            sendToPlayer(player, "ERROR:invalid_numbers");
+            return;
+        }
 
-        MoveResult result = gameState.applyMove(player, from, to);
+        MoveResult result = boardState.applyMove(player, from, to);
+
         if (!result.isValid()) {
             sendToPlayer(player, "ERROR:illegal_move");
             return;
         }
 
-        // Broadcast the updated board to both players
-        broadcast("BOARD:" + gameState.serialize());
+        broadcast("BOARD:" + boardState.serialize());
 
         if (result.isGameOver()) {
             broadcast("GAMEOVER:" + player);
             return;
         }
 
-        if (gameState.hasRemainingMoves()) {
-            // Same player continues using remaining dice
+        if (boardState.hasRemainingMoves()) {
             sendToPlayer(player, "YOUR_TURN:move");
             sendToOpponent(player, "WAIT:opponent_moving");
         } else {
-            gameState.nextTurn();
-            sendToPlayer(gameState.getCurrentPlayer(), "YOUR_TURN:roll");
-            sendToOpponent(gameState.getCurrentPlayer(), "WAIT:opponent_rolling");
+            boardState.nextTurn();
+            sendToPlayer(boardState.getCurrentPlayer(), "YOUR_TURN:roll");
+            sendToOpponent(boardState.getCurrentPlayer(), "WAIT:opponent_rolling");
         }
     }
 
@@ -186,38 +191,39 @@ public class BackgammonGame {
     }
 
     private void handleReplay(int player) {
-        replayCount++;
+        playagaincount++;
+
         sendToOpponent(player, "INFO:Player " + player + " wants to replay.");
-        if (replayCount == 2) {
-            replayCount = 0;
-            handleReady(0); // re-use ready flow
+
+        if (playagaincount == 2) {
+            playagaincount = 0;
+
+            handleReady(1);
+            handleReady(2);
         }
     }
 
-    // ---------------------------------------------------------------
-    // Messaging helpers
-    // ---------------------------------------------------------------
+    // ---------------- helpers ----------------
 
     public void sendToPlayer(int player, String message) {
-        ClientHandler handler = (player == 1) ? player1 : player2;
+        ClientHandler handler = (player == 1) ? playerA : playerB;
         if (handler != null) handler.send(message);
     }
 
     public void sendToOpponent(int player, String message) {
-        ClientHandler handler = (player == 1) ? player2 : player1;
+        ClientHandler handler = (player == 1) ? playerB : playerA;
         if (handler != null) handler.send(message);
     }
 
     public void broadcast(String message) {
-        if (player1 != null) player1.send(message);
-        if (player2 != null) player2.send(message);
+        if (playerA != null) playerA.send(message);
+        if (playerB != null) playerB.send(message);
     }
 
-    /** Called when a client disconnects. */
     public void playerDisconnected(int player) {
         System.out.println("Player " + player + " disconnected.");
+
         int opponent = (player == 1) ? 2 : 1;
         sendToPlayer(opponent, "DISCONNECT:opponent_left");
     }
 }
-
